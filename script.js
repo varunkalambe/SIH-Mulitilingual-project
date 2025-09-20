@@ -1,122 +1,90 @@
-// Wait until DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener("DOMContentLoaded", () => {
+    const uploadZone = document.getElementById("uploadZone");
+    const fileInput = document.getElementById("fileInput");
+    const progressBar = document.getElementById("progressBar");
+    const progressFill = document.getElementById("progressFill");
+    const fileInfo = document.getElementById("fileInfo");
+    const fileName = document.getElementById("fileName");
+    const fileSize = document.getElementById("fileSize");
+    const languageSelector = document.getElementById("languageSelector");
+    const fromLang = document.getElementById("fromLang");
+    const toLang = document.getElementById("toLang");
+    const translateBtn = document.getElementById("translateBtn");
+    const notification = document.getElementById("notification");
+    const notificationText = document.getElementById("notificationText");
 
-    // === SELECT ELEMENTS ===
-    const uploadZone = document.getElementById('uploadZone');
-    const fileInput = document.getElementById('fileInput');
-    const progressBar = document.getElementById('progressBar');
-    const progressFill = document.getElementById('progressFill');
-    const fileInfo = document.getElementById('fileInfo');
-    const fileName = document.getElementById('fileName');
-    const fileSize = document.getElementById('fileSize');
-    const languageSelector = document.getElementById('languageSelector');
-    const translateBtn = document.getElementById('translateBtn');
-    const notification = document.getElementById('notification');
-    const notificationText = document.getElementById('notificationText');
+    let selectedFile = null;
 
-    // === SMOOTH SCROLL FOR NAV LINKS ===
-    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-        anchor.addEventListener('click', (e) => {
-            e.preventDefault();
-            const targetId = anchor.getAttribute('href');
-            const targetElement = document.querySelector(targetId);
-            if (targetElement) {
-                targetElement.scrollIntoView({
-                    behavior: 'smooth',
-                    block: 'start'
-                });
-            }
-        });
+    // Drag & Drop
+    uploadZone.addEventListener("click", () => fileInput.click());
+    uploadZone.addEventListener("dragover", (e) => { e.preventDefault(); uploadZone.classList.add("dragover"); });
+    uploadZone.addEventListener("dragleave", () => uploadZone.classList.remove("dragover"));
+    uploadZone.addEventListener("drop", (e) => { 
+        e.preventDefault(); 
+        uploadZone.classList.remove("dragover"); 
+        if(e.dataTransfer.files.length>0) handleFileSelect(e.dataTransfer.files[0]);
     });
+    fileInput.addEventListener("change", (e) => { if(e.target.files.length>0) handleFileSelect(e.target.files[0]); });
 
-    // === DRAG & DROP / CLICK UPLOAD HANDLERS ===
-    uploadZone.addEventListener('click', () => fileInput.click());
-
-    uploadZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        uploadZone.classList.add('dragover');
-    });
-
-    uploadZone.addEventListener('dragleave', () => {
-        uploadZone.classList.remove('dragover');
-    });
-
-    uploadZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        uploadZone.classList.remove('dragover');
-        if (e.dataTransfer.files.length > 0) {
-            handleFileSelect(e.dataTransfer.files[0]);
-        }
-    });
-
-    fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length > 0) {
-            handleFileSelect(e.target.files[0]);
-        }
-    });
-
-    // === HANDLE FILE SELECTION ===
     function handleFileSelect(file) {
-        // Validate file type
-        const allowedTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-ms-wmv'];
-        if (!allowedTypes.includes(file.type)) {
-            showNotification('❌ Please select a valid video file (MP4, AVI, MOV, WMV)');
-            return;
-        }
+        const allowedTypes = ["video/mp4","video/avi","video/quicktime","video/x-ms-wmv"];
+        if(!allowedTypes.includes(file.type)){ showNotification("❌ Invalid video type"); return; }
+        const maxSize = 100*1024*1024;
+        if(file.size>maxSize){ showNotification("❌ File exceeds 100MB"); return; }
 
-        // Validate file size (100 MB max)
-        const maxSize = 100 * 1024 * 1024; // 100MB in bytes
-        if (file.size > maxSize) {
-            showNotification('❌ File size exceeds 100MB limit');
-            return;
-        }
-
-        // Show file info
+        selectedFile = file;
         fileName.textContent = file.name;
-        fileSize.textContent = (file.size / 1024 / 1024).toFixed(2) + ' MB';
-        fileInfo.style.display = 'block';
-
-        // Show progress bar
-        progressBar.style.display = 'block';
+        fileSize.textContent = (file.size/1024/1024).toFixed(2) + " MB";
+        fileInfo.style.display = "block";
+        progressBar.style.display = "block";
         simulateUploadProgress();
     }
 
-    // === SIMULATE UPLOAD PROGRESS ===
-    function simulateUploadProgress() {
-        progressFill.style.width = '0%';
-        let progress = 0;
-        const interval = setInterval(() => {
-            progress += Math.random() * 15;
-            if (progress > 100) progress = 100;
-            progressFill.style.width = progress + '%';
-
-            if (progress >= 100) {
+    function simulateUploadProgress(){
+        progressFill.style.width="0%";
+        let progress=0;
+        const interval = setInterval(()=>{
+            progress+=Math.random()*15;
+            if(progress>100) progress=100;
+            progressFill.style.width = progress + "%";
+            if(progress>=100){
                 clearInterval(interval);
-                languageSelector.style.display = 'block';
-                translateBtn.classList.add('active');
-                showNotification('✅ File uploaded successfully! You can now select languages.');
+                languageSelector.style.display="block";
+                translateBtn.classList.add("active");
+                showNotification("✅ File ready! Select languages and click Translate.");
             }
         }, 300);
     }
 
-    // === TRANSLATE BUTTON CLICK ===
-    translateBtn.addEventListener('click', () => {
-        if (!translateBtn.classList.contains('active')) return;
-        showNotification('🚀 Translation started! Please wait...');
-        
-        // Simulate translation delay
-        setTimeout(() => {
-            showNotification('✅ Translation completed! 🎉 Click download to save your file.');
-        }, 4000);
+    translateBtn.addEventListener("click", async ()=>{
+        if(!translateBtn.classList.contains("active")) return;
+        if(!selectedFile){ showNotification("❌ No file selected!"); return; }
+
+        const formData = new FormData();
+        formData.append("video", selectedFile);
+        formData.append("fromLang", fromLang.value);
+        formData.append("toLang", toLang.value);
+
+        showNotification("🚀 Uploading video...");
+
+        try{
+            const response = await fetch("http://localhost:5000/api/upload", { method:"POST", body:formData });
+            const data = await response.json();
+
+            if(response.ok){
+                showNotification(`✅ Upload complete! Download: ${data.downloadUrl}`);
+            }else{
+                showNotification(`❌ Error: ${data.error || "Unknown error"}`);
+            }
+        }catch(err){
+            console.error(err);
+            showNotification(`❌ Network/server error: ${err.message}`);
+        }
     });
 
-    // === SHOW NOTIFICATION FUNCTION ===
-    function showNotification(message) {
+    function showNotification(message){
         notificationText.textContent = message;
-        notification.classList.add('show');
-
-        setTimeout(() => {
-            notification.classList.remove('show');
-        }, 4000);
+        notification.classList.add("show");
+        setTimeout(()=> notification.classList.remove("show"),4000);
     }
 });
