@@ -1,4 +1,4 @@
-// controllers/processController.js
+// controllers/processController.js - FIXED TO USE PROPER VIDEO ASSEMBLY
 
 // ===== IMPORT REQUIRED MODULES =====
 import Upload from '../models/uploadModel.js'; 
@@ -6,11 +6,12 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import fs from 'fs';
 import path from 'path';
-import { extractAudio, replaceAudioInVideo } from '../services/audioService.js';
+import { extractAudio } from '../services/audioService.js';
 import { transcribeAudio } from '../services/transcriptionService.js';
 import { translateText } from '../services/translationService.js';
 import { generateTTS } from '../services/ttsService.js';
 import { generateCaptions } from '../services/captionService.js';
+import { assembleVideoWithCaptions, assembleVideoWithAudioOnly } from '../services/videoService.js'; // ✅ FIXED: Import proper video service
 
 // Set FFmpeg binary path (required for fluent-ffmpeg to work)
 ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -31,7 +32,7 @@ export const processVideo = async (jobId) => {
       processing_started_at: new Date()
     });
 
-    // ===== STEP 2: EXTRACT AUDIO FROM VIDEO - REAL! =====
+    // ===== STEP 2: EXTRACT AUDIO FROM VIDEO =====
     console.log(`[${jobId}] Step 1/6: Extracting audio from video...`);
     const audioPath = await extractAudio(jobId);
     console.log(`[${jobId}] ✅ Audio extraction completed: ${audioPath}`);
@@ -40,7 +41,7 @@ export const processVideo = async (jobId) => {
       processing_step: 'transcription'
     });
 
-    // ===== STEP 3: CONVERT AUDIO TO TEXT - NOW REAL! =====
+    // ===== STEP 3: CONVERT AUDIO TO TEXT =====
     console.log(`[${jobId}] Step 2/6: Converting speech to text...`);
     const transcription = await transcribeAudio(jobId);
     console.log(`[${jobId}] ✅ Transcription completed`);
@@ -52,7 +53,7 @@ export const processVideo = async (jobId) => {
       transcription_completed_at: new Date()
     });
 
-    // ===== STEP 4: TRANSLATE TEXT TO TARGET LANGUAGE - NOW REAL! =====
+    // ===== STEP 4: TRANSLATE TEXT TO TARGET LANGUAGE =====
     console.log(`[${jobId}] Step 3/6: Translating text to target language...`);
     const translation = await translateText(transcription, jobId);
     console.log(`[${jobId}] ✅ Translation completed`);
@@ -65,7 +66,7 @@ export const processVideo = async (jobId) => {
       translation_completed_at: new Date()
     });
 
-    // ===== STEP 5: GENERATE TRANSLATED SPEECH - NOW REAL! =====
+    // ===== STEP 5: GENERATE TRANSLATED SPEECH =====
     console.log(`[${jobId}] Step 4/6: Generating speech in target language...`);
     const ttsAudioPath = await generateTTS(translation, jobId);
     console.log(`[${jobId}] ✅ Speech generation completed: ${ttsAudioPath}`);
@@ -76,7 +77,7 @@ export const processVideo = async (jobId) => {
       tts_completed_at: new Date()
     });
 
-    // ===== STEP 6: CREATE CAPTIONS AND TRANSCRIPT - NOW REAL! =====
+    // ===== STEP 6: CREATE CAPTIONS AND TRANSCRIPT =====
     console.log(`[${jobId}] Step 5/6: Creating captions and transcript files...`);
     const captionResult = await generateCaptions(translation, jobId);
     console.log(`[${jobId}] ✅ Caption generation completed`);
@@ -93,8 +94,9 @@ export const processVideo = async (jobId) => {
     });
 
     // ===== STEP 7: ASSEMBLE FINAL VIDEO WITH CAPTIONS =====
+    // ✅ FIXED: Now uses proper videoService.js function instead of placeholder
     console.log(`[${jobId}] Step 6/6: Assembling final translated video with captions...`);
-    const finalVideoPath = await assembleVideoWithCaptions(jobId);
+    const finalVideoPath = await assembleVideoWithCaptions(jobId); // ✅ Uses proper video service
     console.log(`[${jobId}] ✅ Video assembly completed: ${finalVideoPath}`);
 
     // ===== STEP 8: MARK JOB AS COMPLETED =====
@@ -190,90 +192,6 @@ export const getProcessingStatus = async (req, res) => {
       details: error.message
     });
   }
-};
-
-// ===== VIDEO ASSEMBLY FUNCTION =====
-/**
- * Combine original video with translated audio and embed captions
- */
-export const assembleVideoWithCaptions = async (jobId) => {
-  return new Promise(async (resolve, reject) => {
-    try {
-      console.log(`[${jobId}] Starting complete video assembly with captions...`);
-      
-      const video = await Upload.findById(jobId);
-      if (!video) {
-        throw new Error(`Video record not found in database for job: ${jobId}`);
-      }
-      
-      const originalVideoPath = video.file_path;
-      const translatedAudioPath = video.tts_audio_path || `uploads/translated_audio/${jobId}_translated.wav`;
-      const captionFilePath = video.caption_file_path || `uploads/captions/${jobId}_captions.vtt`;
-      const outputVideoPath = `uploads/processed/${jobId}_final.mp4`;
-      
-      console.log(`[${jobId}] Original video: ${originalVideoPath}`);
-      console.log(`[${jobId}] Translated audio: ${translatedAudioPath}`);
-      console.log(`[${jobId}] Caption file: ${captionFilePath}`);
-      console.log(`[${jobId}] Output video: ${outputVideoPath}`);
-      
-      const processedDir = 'uploads/processed/';
-      if (!fs.existsSync(processedDir)) {
-        fs.mkdirSync(processedDir, { recursive: true });
-        console.log(`[${jobId}] Created processed directory: ${processedDir}`);
-      }
-      
-      if (!fs.existsSync(originalVideoPath)) {
-        throw new Error(`Original video file not found: ${originalVideoPath}`);
-      }
-      
-      if (!fs.existsSync(translatedAudioPath)) {
-        console.warn(`[${jobId}] ⚠️ Translated audio not found: ${translatedAudioPath}`);
-        console.warn(`[${jobId}] ⚠️ Using original audio instead.`);
-        // Simple copy for now (placeholder when no TTS audio)
-        fs.copyFileSync(originalVideoPath, outputVideoPath);
-      } else {
-        console.log(`[${jobId}] ✅ Using translated audio: ${translatedAudioPath}`);
-        // TODO: Real FFmpeg video assembly with translated audio
-        // For now, just copy original video
-        fs.copyFileSync(originalVideoPath, outputVideoPath);
-      }
-      
-      const hasCaptions = fs.existsSync(captionFilePath);
-      console.log(`[${jobId}] Assembly mode: ${hasCaptions ? 'Video + Audio + Captions' : 'Video + Audio only'}`);
-      
-      const outputStats = fs.statSync(outputVideoPath);
-      console.log(`[${jobId}] Final video file size: ${Math.round(outputStats.size / 1024 / 1024)} MB`);
-      
-      await Upload.findByIdAndUpdate(jobId, {
-        processed_file_path: outputVideoPath,
-        processed_file_size: outputStats.size,
-        video_codec: 'libx264',
-        audio_codec: 'aac',
-        video_resolution: '720p',
-        has_embedded_captions: hasCaptions,
-        processing_service: 'ffmpeg-video-assembly',
-        video_assembly_completed_at: new Date()
-      });
-      
-      console.log(`[${jobId}] ✅ Final translated video ready: ${outputVideoPath}`);
-      resolve(outputVideoPath);
-      
-    } catch (error) {
-      console.error(`[${jobId}] ❌ Video assembly setup failed:`, error.message);
-      
-      try {
-        await Upload.findByIdAndUpdate(jobId, {
-          video_assembly_error: error.message,
-          video_assembly_failed_at: new Date(),
-          processing_service: 'ffmpeg-video-assembly-failed'
-        });
-      } catch (dbError) {
-        console.error(`[${jobId}] Failed to save video assembly error to database:`, dbError.message);
-      }
-      
-      reject(error);
-    }
-  });
 };
 
 // ===== HELPER FUNCTIONS =====

@@ -1,39 +1,38 @@
-// ===== IMPORT REQUIRED MODULES =====
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
-const fs = require('fs');
-const path = require('path');
+// services/videoService.js - FIXED VIDEO ASSEMBLY WITH PROPER AUDIO REPLACEMENT
 
-// Import utilities and database connection
-const { getDB } = require('../config/database');
+// ===== IMPORT REQUIRED MODULES =====
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStatic from 'ffmpeg-static';
+import fs from 'fs';
+import path from 'path';
+import Upload from '../models/uploadModel.js';
 
 // Set FFmpeg binary path (required for fluent-ffmpeg to work)
-ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfmpegPath(ffmpegStatic);
 
 // ===== MAIN VIDEO ASSEMBLY FUNCTION =====
 /**
  * Combine original video with translated audio and embed captions
- * Called by processController.js in step 7 of processing pipeline (replaces audioService.replaceAudioInVideo)
+ * Called by processController.js in step 6 of processing pipeline
  * @param {string} jobId - Unique job identifier to locate all required files
  * @returns {Promise<string>} - Path to final processed video with translated audio and embedded captions
  */
-const assembleVideoWithCaptions = async (jobId) => {
+export const assembleVideoWithCaptions = async (jobId) => {
   return new Promise(async (resolve, reject) => {
     try {
       console.log(`[${jobId}] Starting complete video assembly with captions...`);
       
       // ===== GET VIDEO INFO FROM DATABASE =====
-      const db = getDB();
-      const video = await db.collection('videos').findOne({ _id: jobId });
+      const video = await Upload.findById(jobId);
       
       if (!video) {
         throw new Error(`Video record not found in database for job: ${jobId}`);
       }
       
       // ===== DEFINE FILE PATHS =====
-      const originalVideoPath = video.file_path;                                    // Original uploaded video
-      const translatedAudioPath = `./uploads/translated_audio/${jobId}_translated.mp3`; // Generated TTS audio
-      const captionFilePath = `./uploads/captions/${jobId}_captions.vtt`;           // Generated WebVTT captions
+      const originalVideoPath = video.original_file_path;                           // ✅ FIXED: Use mongoose field name
+      const translatedAudioPath = video.tts_audio_path || `./uploads/translated_audio/${jobId}_translated.wav`; // ✅ FIXED: Use .wav extension
+      const captionFilePath = video.caption_file_path || `./uploads/captions/${jobId}_captions.vtt`;           // Generated WebVTT captions
       const outputVideoPath = `./uploads/processed/${jobId}_final.mp4`;             // Final processed video
       
       console.log(`[${jobId}] Original video: ${originalVideoPath}`);
@@ -65,15 +64,15 @@ const assembleVideoWithCaptions = async (jobId) => {
       const hasCaptions = fs.existsSync(captionFilePath);
       console.log(`[${jobId}] Assembly mode: ${hasCaptions ? 'Video + Audio + Captions' : 'Video + Audio only'}`);
       
-      // ===== ASSEMBLE VIDEO USING FFMPEG =====
+      // ===== ASSEMBLE VIDEO USING FFMPEG - PROPER AUDIO REPLACEMENT =====
       let ffmpegCommand = ffmpeg()
-        .input(originalVideoPath)     // Input 1: Original video (has video track + old audio)
-        .input(translatedAudioPath);  // Input 2: Translated audio track
+        .input(originalVideoPath)     // Input 0: Original video (has video track + old audio)
+        .input(translatedAudioPath);  // Input 1: Translated audio track
       
-      // ===== CONFIGURE VIDEO PROCESSING =====
+      // ===== CONFIGURE VIDEO PROCESSING WITH PROPER AUDIO REPLACEMENT =====
       ffmpegCommand
         .videoCodec('libx264')        // H.264 codec (widely supported)
-        .audioCodec('aac')            // AAC audio codec (widely supported)
+        .audioCodec('aac')            // AAC audio codec (widely supported)  
         .audioBitrate('128k')         // Good quality audio bitrate
         .videoFilter('scale=-2:720')  // Scale to 720p (maintain aspect ratio)
         .outputOptions([
@@ -81,18 +80,18 @@ const assembleVideoWithCaptions = async (jobId) => {
           '-crf', '23',               // Constant Rate Factor (good quality)
           '-shortest',                // Match shortest stream duration
           '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
-          '-map', '0:v:0',           // Map video from first input (original video)
-          '-map', '1:a:0'            // Map audio from second input (translated audio)
+          '-map', '0:v:0',           // ✅ FIXED: Map video from input 0 (original video)
+          '-map', '1:a:0'            // ✅ FIXED: Map audio from input 1 (translated audio) - REPLACES original audio
         ]);
       
       // ===== ADD CAPTION EMBEDDING IF AVAILABLE =====
       if (hasCaptions) {
         console.log(`[${jobId}] Adding embedded captions from: ${captionFilePath}`);
         
-        // Add caption subtitle filter
-        ffmpegCommand.outputOptions([
-          '-vf', `subtitles='${captionFilePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`,
-          '-c:s', 'mov_text'          // Subtitle codec for MP4
+        // Add caption subtitle filter (burn subtitles into video)
+        ffmpegCommand.videoFilter([
+          `scale=-2:720`,
+          `subtitles='${captionFilePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
         ]);
       }
       
@@ -135,27 +134,22 @@ const assembleVideoWithCaptions = async (jobId) => {
             }
             
             // ===== SAVE VIDEO ASSEMBLY INFO TO DATABASE =====
-            await db.collection('videos').updateOne(
-              { _id: jobId },
-              { 
-                $set: { 
-                  processed_file_path: outputVideoPath,
-                  processed_file_size: outputStats.size,
-                  video_codec: 'libx264',
-                  audio_codec: 'aac',
-                  video_resolution: '720p',
-                  has_embedded_captions: hasCaptions,
-                  processing_service: 'ffmpeg-video-assembly',
-                  video_assembly_completed_at: new Date(),
-                  final_processing_stats: {
-                    original_video_path: originalVideoPath,
-                    translated_audio_path: translatedAudioPath,
-                    caption_file_path: hasCaptions ? captionFilePath : null,
-                    output_file_size_mb: Math.round(outputStats.size / 1024 / 1024)
-                  }
-                }
+            await Upload.findByIdAndUpdate(jobId, {
+              processed_file_path: outputVideoPath,
+              processed_file_size: outputStats.size,
+              video_codec: 'libx264',
+              audio_codec: 'aac',
+              video_resolution: '720p',
+              has_embedded_captions: hasCaptions,
+              processing_service: 'ffmpeg-video-assembly',
+              video_assembly_completed_at: new Date(),
+              final_processing_stats: {
+                original_video_path: originalVideoPath,
+                translated_audio_path: translatedAudioPath,
+                caption_file_path: hasCaptions ? captionFilePath : null,
+                output_file_size_mb: Math.round(outputStats.size / 1024 / 1024)
               }
-            );
+            });
             
             console.log(`[${jobId}] ✅ Final translated video ready: ${outputVideoPath}`);
             console.log(`[${jobId}] Features: Translated audio${hasCaptions ? ' + Embedded captions' : ''} + 720p quality`);
@@ -193,17 +187,11 @@ const assembleVideoWithCaptions = async (jobId) => {
       
       // Save error to database
       try {
-        const db = getDB();
-        await db.collection('videos').updateOne(
-          { _id: jobId },
-          { 
-            $set: { 
-              video_assembly_error: error.message,
-              video_assembly_failed_at: new Date(),
-              processing_service: 'ffmpeg-video-assembly-failed'
-            }
-          }
-        );
+        await Upload.findByIdAndUpdate(jobId, {
+          video_assembly_error: error.message,
+          video_assembly_failed_at: new Date(),
+          processing_service: 'ffmpeg-video-assembly-failed'
+        });
       } catch (dbError) {
         console.error(`[${jobId}] Failed to save video assembly error to database:`, dbError.message);
       }
@@ -220,22 +208,21 @@ const assembleVideoWithCaptions = async (jobId) => {
  * @param {string} jobId - Unique job identifier
  * @returns {Promise<string>} - Path to final video
  */
-const assembleVideoWithAudioOnly = async (jobId) => {
+export const assembleVideoWithAudioOnly = async (jobId) => {
   return new Promise(async (resolve, reject) => {
     try {
       console.log(`[${jobId}] Starting video + audio assembly (no captions)...`);
       
       // ===== GET VIDEO INFO FROM DATABASE =====
-      const db = getDB();
-      const video = await db.collection('videos').findOne({ _id: jobId });
+      const video = await Upload.findById(jobId);
       
       if (!video) {
         throw new Error(`Video record not found for job: ${jobId}`);
       }
       
       // ===== DEFINE FILE PATHS =====
-      const originalVideoPath = video.file_path;
-      const translatedAudioPath = `./uploads/translated_audio/${jobId}_translated.mp3`;
+      const originalVideoPath = video.original_file_path;
+      const translatedAudioPath = video.tts_audio_path || `./uploads/translated_audio/${jobId}_translated.wav`;
       const outputVideoPath = `./uploads/processed/${jobId}_final.mp4`;
       
       // ===== VERIFY INPUT FILES =====
@@ -253,20 +240,24 @@ const assembleVideoWithAudioOnly = async (jobId) => {
         fs.mkdirSync(processedDir, { recursive: true });
       }
       
-      // ===== SIMPLE VIDEO + AUDIO ASSEMBLY =====
+      // ===== SIMPLE VIDEO + AUDIO ASSEMBLY WITH PROPER AUDIO REPLACEMENT =====
       ffmpeg()
-        .input(originalVideoPath)
-        .input(translatedAudioPath)
+        .input(originalVideoPath)     // Input 0: Original video
+        .input(translatedAudioPath)   // Input 1: Translated audio
         .videoCodec('copy')           // Copy video without re-encoding (faster)
-        .audioCodec('aac')
-        .audioBitrate('192k')
+        .audioCodec('aac')            // Encode audio to AAC
+        .audioBitrate('192k')         // High quality audio bitrate
         .outputOptions([
-          '-shortest',
+          '-shortest',                // Match shortest stream duration
           '-avoid_negative_ts', 'make_zero',
-          '-map', '0:v:0',           // Video from input 1
-          '-map', '1:a:0'            // Audio from input 2
+          '-map', '0:v:0',           // ✅ Map video from input 0
+          '-map', '1:a:0'            // ✅ Map audio from input 1 (REPLACES original)
         ])
         .output(outputVideoPath)
+        
+        .on('start', (commandLine) => {
+          console.log(`[${jobId}] Simple assembly command: ${commandLine}`);
+        })
         
         .on('end', () => {
           console.log(`[${jobId}] ✅ Simple video assembly completed: ${outputVideoPath}`);
@@ -293,7 +284,7 @@ const assembleVideoWithAudioOnly = async (jobId) => {
  * @param {string} jobId - Job ID for logging
  * @returns {Promise<Object>} - Video metadata
  */
-const getVideoInfo = async (videoPath, jobId) => {
+export const getVideoInfo = async (videoPath, jobId) => {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(videoPath, (error, metadata) => {
       if (error) {
@@ -333,7 +324,7 @@ const getVideoInfo = async (videoPath, jobId) => {
  * Check if FFmpeg is properly installed and accessible
  * @returns {Promise<boolean>} - True if FFmpeg is available
  */
-const validateFFmpegInstallation = async () => {
+export const validateFFmpegInstallation = async () => {
   return new Promise((resolve) => {
     ffmpeg()
       .input('test')
@@ -350,12 +341,4 @@ const validateFFmpegInstallation = async () => {
       .output('null')
       .run();
   });
-};
-
-// ===== EXPORT FUNCTIONS =====
-module.exports = { 
-  assembleVideoWithCaptions,     // Main video assembly function (replaces audioService.replaceAudioInVideo)
-  assembleVideoWithAudioOnly,    // Fallback function for audio-only assembly
-  getVideoInfo,                  // Video metadata helper
-  validateFFmpegInstallation     // FFmpeg validation helper
 };

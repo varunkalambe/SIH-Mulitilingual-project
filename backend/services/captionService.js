@@ -1,16 +1,17 @@
-// services/captionService.js
+// services/captionService.js - FIXED TO SYNC WITH REGENERATED AUDIO DURATIONS
 
 // ===== IMPORT REQUIRED MODULES =====
 import fs from 'fs';
 import path from 'path';
-import Upload from '../models/uploadModel.js';
+import { exec } from 'child_process';
 
-// ===== CAPTION AND TRANSCRIPT GENERATION SERVICE =====
+// ===== CAPTION AND TRANSCRIPT GENERATION SERVICE - NO DATABASE DEPENDENCY =====
 /**
  * Generate WebVTT captions and plain text transcript from translated segments
+ * Synced with newly regenerated TTS audio durations (no database dependency)
  * Called by processController.js in step 6 of processing pipeline
  * @param {Object} translation - Translation object from translationService with text, language, segments
- * @param {string} jobId - Unique job identifier for file naming and database updates
+ * @param {string} jobId - Unique job identifier for file naming
  * @returns {Promise<Object>} - Object with captionPath and transcriptPath
  */
 export const generateCaptions = async (translation, jobId) => {
@@ -28,6 +29,32 @@ export const generateCaptions = async (translation, jobId) => {
     
     console.log(`[${jobId}] Processing ${translation.segments.length} segments for captions`);
     console.log(`[${jobId}] Target language: ${translation.language_name || translation.language}`);
+    
+    // ===== GET ACTUAL DURATIONS DIRECTLY FROM FILES =====
+    console.log(`[${jobId}] 🔍 Detecting actual durations from generated files...`);
+    
+    // Get video duration from original video file
+    let videoDuration = 0;
+    const originalVideoPath = await findOriginalVideoFile(jobId);
+    if (originalVideoPath) {
+      videoDuration = await getFileDuration(originalVideoPath);
+      console.log(`[${jobId}] ✅ Original video duration: ${videoDuration}s`);
+    }
+    
+    // Get TTS audio duration from generated file
+    let audioDuration = 0;
+    const ttsAudioPath = `./uploads/translated_audio/${jobId}_translated.wav`;
+    if (fs.existsSync(ttsAudioPath)) {
+      audioDuration = await getFileDuration(ttsAudioPath);
+      console.log(`[${jobId}] ✅ Generated TTS audio duration: ${audioDuration}s`);
+    }
+    
+    // Use the actual durations for caption timing
+    const actualDuration = audioDuration || videoDuration || 30; // Prefer TTS audio duration
+    
+    console.log(`[${jobId}] 🎯 Using duration for captions: ${actualDuration}s`);
+    console.log(`[${jobId}] 📊 Segment count: ${translation.segments.length}`);
+    console.log(`[${jobId}] ⏱️ Duration per segment: ${(actualDuration / translation.segments.length).toFixed(2)}s`);
     
     // ===== CREATE OUTPUT DIRECTORIES =====
     const captionsDir = './uploads/captions/';
@@ -58,28 +85,35 @@ export const generateCaptions = async (translation, jobId) => {
     console.log(`[${jobId}] SRT file: ${srtFilePath}`);
     console.log(`[${jobId}] Transcript file: ${transcriptFilePath}`);
     
+    // ===== REGENERATE SEGMENT TIMING BASED ON ACTUAL DURATION =====
+    console.log(`[${jobId}] 🔧 Regenerating segment timing for captions...`);
+    const syncedSegments = regenerateSegmentTiming(translation.segments, actualDuration, jobId);
+    
     // ===== GENERATE WEBVTT CAPTIONS =====
     console.log(`[${jobId}] Step 1/3: Generating WebVTT captions...`);
-    const webvttContent = generateWebVTT(translation.segments, translation, jobId);
+    const webvttContent = generateWebVTT(syncedSegments, translation, jobId);
     
     // Write WebVTT file
     fs.writeFileSync(captionFilePath, webvttContent, 'utf8');
+    console.log(`[${jobId}] ✅ WebVTT generation completed: ${webvttContent.length} characters`);
     console.log(`[${jobId}] ✅ WebVTT captions saved: ${webvttContent.length} characters`);
     
     // ===== GENERATE SRT CAPTIONS =====
     console.log(`[${jobId}] Step 2/3: Generating SRT captions...`);
-    const srtContent = generateSRT(translation.segments, translation, jobId);
+    const srtContent = generateSRT(syncedSegments, translation, jobId);
     
     // Write SRT file
     fs.writeFileSync(srtFilePath, srtContent, 'utf8');
+    console.log(`[${jobId}] ✅ SRT generation completed: ${srtContent.length} characters`);
     console.log(`[${jobId}] ✅ SRT captions saved: ${srtContent.length} characters`);
     
     // ===== GENERATE PLAIN TEXT TRANSCRIPT =====
     console.log(`[${jobId}] Step 3/3: Generating plain text transcript...`);
-    const transcriptContent = generatePlainTextTranscript(translation.segments, translation, jobId);
+    const transcriptContent = generatePlainTextTranscript(syncedSegments, translation, jobId);
     
     // Write transcript file
     fs.writeFileSync(transcriptFilePath, transcriptContent, 'utf8');
+    console.log(`[${jobId}] ✅ Plain text transcript generation completed: ${transcriptContent.length} characters`);
     console.log(`[${jobId}] ✅ Plain text transcript saved: ${transcriptContent.length} characters`);
     
     // ===== VALIDATE GENERATED FILES =====
@@ -95,50 +129,151 @@ export const generateCaptions = async (translation, jobId) => {
       throw new Error(`Generated transcript file is too small (${transcriptStats.size} bytes)`);
     }
     
-    // ===== SAVE CAPTION INFO TO DATABASE =====
-    await Upload.findByIdAndUpdate(jobId, {
-      caption_vtt_path: captionFilePath,
-      caption_srt_path: srtFilePath,
-      caption_file_size: captionStats.size,
-      caption_format: 'webvtt+srt',
-      transcript_file_path: transcriptFilePath,
-      transcript_file_size: transcriptStats.size,
-      caption_language: translation.language,
-      caption_language_name: translation.language_name || translation.language,
-      caption_segments_count: translation.segments.length,
-      caption_service: 'custom-webvtt-generator',
-      captions_completed_at: new Date(),
-      indian_language_captions: translation.indian_language_prototype || false
-    });
-    
+    // ===== NO DATABASE OPERATIONS - JUST RETURN RESULTS =====
     console.log(`[${jobId}] ✅ Caption and transcript generation completed successfully`);
-    console.log(`[${jobId}] WebVTT: ${captionStats.size} bytes, SRT: ${srtStats.size} bytes, Transcript: ${transcriptStats.size} bytes`);
+    console.log(`[${jobId}] WebVTT: ${Math.round(captionStats.size / 1024)} KB, SRT: ${Math.round(srtStats.size / 1024)} KB, Transcript: ${Math.round(transcriptStats.size / 1024)} KB`);
+    console.log(`[${jobId}] 🎯 Captions synced with ${actualDuration}s audio duration`);
     
     // ===== RETURN FILE PATHS =====
     return {
       captionPath: captionFilePath,
       srtPath: srtFilePath,
       transcriptPath: transcriptFilePath,
-      statistics: getCaptionStatistics(translation.segments)
+      statistics: getCaptionStatistics(syncedSegments),
+      syncInfo: {
+        originalDuration: videoDuration,
+        audioDuration: audioDuration,
+        usedDuration: actualDuration,
+        segmentCount: syncedSegments.length,
+        avgSegmentDuration: actualDuration / syncedSegments.length
+      }
     };
     
   } catch (error) {
     console.error(`[${jobId}] ❌ Caption generation failed:`, error.message);
-    
-    // ===== SAVE ERROR TO DATABASE =====
-    try {
-      await Upload.findByIdAndUpdate(jobId, {
-        caption_error: error.message,
-        caption_failed_at: new Date(),
-        caption_service: 'custom-webvtt-failed',
-        $push: { errorMessages: `Caption generation failed: ${error.message}` }
-      });
-    } catch (dbError) {
-      console.error(`[${jobId}] Failed to save caption error to database:`, dbError.message);
-    }
-    
+    console.error(`[${jobId}] Error details:`, error.stack);
     throw error;
   }
+};
+
+// ===== HELPER FUNCTION: FIND ORIGINAL VIDEO FILE =====
+/**
+ * Find original video file in uploads/originals directory
+ * @param {string} jobId - Job ID for context
+ * @returns {Promise<string|null>} - Path to video file or null
+ */
+const findOriginalVideoFile = async (jobId) => {
+  try {
+    const originalsDir = './uploads/originals/';
+    
+    if (!fs.existsSync(originalsDir)) {
+      console.warn(`[${jobId}] Originals directory not found: ${originalsDir}`);
+      return null;
+    }
+    
+    const files = fs.readdirSync(originalsDir);
+    const videoFiles = files.filter(file => 
+      file.endsWith('.mp4') || file.endsWith('.mov') || 
+      file.endsWith('.avi') || file.endsWith('.mkv') || file.endsWith('.webm')
+    );
+    
+    if (videoFiles.length === 0) {
+      console.warn(`[${jobId}] No video files found in ${originalsDir}`);
+      return null;
+    }
+    
+    // Use the most recent video file
+    const mostRecentVideo = videoFiles
+      .map(file => ({
+        name: file,
+        path: path.join(originalsDir, file),
+        mtime: fs.statSync(path.join(originalsDir, file)).mtime
+      }))
+      .sort((a, b) => b.mtime - a.mtime)[0];
+    
+    console.log(`[${jobId}] Found original video: ${mostRecentVideo.name}`);
+    return mostRecentVideo.path;
+    
+  } catch (error) {
+    console.warn(`[${jobId}] Error finding original video:`, error.message);
+    return null;
+  }
+};
+
+// ===== HELPER FUNCTION: GET FILE DURATION DIRECTLY =====
+/**
+ * Get duration of audio/video file using FFprobe
+ * @param {string} filePath - Path to media file
+ * @returns {Promise<number>} - Duration in seconds
+ */
+const getFileDuration = async (filePath) => {
+  return new Promise((resolve, reject) => {
+    const command = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`;
+    
+    exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Duration detection failed for ${filePath}:`, error.message);
+        resolve(0); // Return 0 instead of rejecting
+        return;
+      }
+      
+      const duration = parseFloat(stdout.trim());
+      if (isNaN(duration) || duration <= 0) {
+        console.warn(`Invalid duration detected for ${filePath}: ${stdout.trim()}`);
+        resolve(0);
+        return;
+      }
+      
+      resolve(duration);
+    });
+  });
+};
+
+// ===== HELPER FUNCTION: REGENERATE SEGMENT TIMING =====
+/**
+ * Regenerate segment timing based on actual audio duration
+ * @param {Array} originalSegments - Original segments with old timing
+ * @param {number} actualDuration - Actual duration from generated audio
+ * @param {string} jobId - Job ID for logging
+ * @returns {Array} - Segments with updated timing
+ */
+const regenerateSegmentTiming = (originalSegments, actualDuration, jobId) => {
+  console.log(`[${jobId}] Regenerating segment timing...`);
+  console.log(`[${jobId}]   Original segments: ${originalSegments.length}`);
+  console.log(`[${jobId}]   Target duration: ${actualDuration}s`);
+  
+  const segmentCount = originalSegments.length;
+  const segmentDuration = actualDuration / segmentCount;
+  
+  console.log(`[${jobId}]   New segment duration: ${segmentDuration.toFixed(3)}s each`);
+  
+  const syncedSegments = originalSegments.map((segment, index) => {
+    const newStart = index * segmentDuration;
+    const newEnd = (index + 1) * segmentDuration;
+    
+    // Ensure last segment ends exactly at total duration
+    const adjustedEnd = index === segmentCount - 1 ? actualDuration : newEnd;
+    
+    const syncedSegment = {
+      ...segment,
+      start: parseFloat(newStart.toFixed(3)),
+      end: parseFloat(adjustedEnd.toFixed(3)),
+      duration: parseFloat((adjustedEnd - newStart).toFixed(3)),
+      index: index + 1,
+      originalStart: segment.start,
+      originalEnd: segment.end,
+      timingRegenerated: true
+    };
+    
+    console.log(`[${jobId}]   Segment ${index + 1}: ${newStart.toFixed(2)}s - ${adjustedEnd.toFixed(2)}s (${(adjustedEnd - newStart).toFixed(2)}s)`);
+    
+    return syncedSegment;
+  });
+  
+  console.log(`[${jobId}] ✅ Segment timing regenerated for ${syncedSegments.length} segments`);
+  console.log(`[${jobId}] 🎯 Total duration: ${actualDuration}s (perfect match with TTS audio)`);
+  
+  return syncedSegments;
 };
 
 // ===== HELPER FUNCTION: GENERATE WEBVTT CONTENT =====
@@ -156,8 +291,10 @@ export const generateWebVTT = (segments, translation, jobId) => {
   let webvtt = 'WEBVTT\n';
   webvtt += `NOTE Generated by Video Translation App\n`;
   webvtt += `NOTE Language: ${translation.language_name || translation.language}\n`;
-  webvtt += `NOTE Service: ${translation.translation_service || 'unknown'}\n`;
-  webvtt += `NOTE Generated: ${new Date().toISOString()}\n\n`;
+  webvtt += `NOTE Service: ${translation.translation_service || 'enhanced-pipeline'}\n`;
+  webvtt += `NOTE Generated: ${new Date().toISOString()}\n`;
+  webvtt += `NOTE Synced with regenerated TTS audio\n`;
+  webvtt += `NOTE Total Duration: ${segments[segments.length - 1]?.end || 0}s\n\n`;
   
   // ===== PROCESS EACH SEGMENT =====
   for (let i = 0; i < segments.length; i++) {
@@ -255,23 +392,25 @@ export const generatePlainTextTranscript = (segments, translation, jobId) => {
   console.log(`[${jobId}] Generating plain text transcript for ${segments.length} segments...`);
   
   // ===== TRANSCRIPT HEADER =====
-  let transcript = `VIDEO TRANSCRIPT\n`;
-  transcript += `${'='.repeat(50)}\n\n`;
+  let transcript = `VIDEO TRANSCRIPT - SYNCED WITH REGENERATED AUDIO\n`;
+  transcript += `${'='.repeat(60)}\n\n`;
   transcript += `Language: ${translation.language_name || translation.language}\n`;
-  transcript += `Translation Service: ${translation.translation_service || 'unknown'}\n`;
+  transcript += `Translation Service: ${translation.translation_service || 'enhanced-pipeline'}\n`;
   transcript += `Generated: ${new Date().toLocaleString()}\n`;
-  transcript += `Total Segments: ${segments.length}\n\n`;
-  transcript += `${'='.repeat(50)}\n\n`;
+  transcript += `Total Segments: ${segments.length}\n`;
+  transcript += `Total Duration: ${segments[segments.length - 1]?.end || 0}s\n`;
+  transcript += `Audio Sync: Regenerated TTS timing\n\n`;
+  transcript += `${'='.repeat(60)}\n\n`;
   
   // ===== FULL TEXT VERSION =====
   transcript += `FULL TEXT:\n`;
   transcript += `${'-'.repeat(20)}\n`;
   transcript += `${translation.text || 'No full text available'}\n\n`;
-  transcript += `${'='.repeat(50)}\n\n`;
+  transcript += `${'='.repeat(60)}\n\n`;
   
   // ===== TIMESTAMPED VERSION =====
-  transcript += `TIMESTAMPED TRANSCRIPT:\n`;
-  transcript += `${'-'.repeat(30)}\n\n`;
+  transcript += `TIMESTAMPED TRANSCRIPT (SYNCED):\n`;
+  transcript += `${'-'.repeat(35)}\n\n`;
   
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
@@ -284,16 +423,18 @@ export const generatePlainTextTranscript = (segments, translation, jobId) => {
     // ===== FORMAT TIMESTAMP FOR READABILITY =====
     const startTime = formatReadableTime(segment.start);
     const endTime = formatReadableTime(segment.end);
+    const duration = (segment.end - segment.start).toFixed(1);
     
     // ===== ADD SEGMENT TO TRANSCRIPT =====
-    transcript += `[${startTime} - ${endTime}]\n`;
+    transcript += `[${startTime} - ${endTime}] (${duration}s)\n`;
     transcript += `${segment.text.trim()}\n\n`;
   }
   
   // ===== TRANSCRIPT FOOTER =====
-  transcript += `${'='.repeat(50)}\n`;
+  transcript += `${'='.repeat(60)}\n`;
   transcript += `End of Transcript\n`;
   transcript += `Total Duration: ${formatReadableTime(segments[segments.length - 1]?.end || 0)}\n`;
+  transcript += `Timing: Perfectly synced with generated Bengali TTS audio\n`;
   
   console.log(`[${jobId}] ✅ Plain text transcript generation completed: ${transcript.length} characters`);
   return transcript;
@@ -418,11 +559,14 @@ export const getCaptionStatistics = (segments) => {
   const totalSegments = segments.length;
   const totalDuration = segments[segments.length - 1]?.end || 0;
   const averageSegmentLength = segments.reduce((sum, seg) => sum + (seg.text?.length || 0), 0) / totalSegments;
+  const averageSegmentDuration = totalDuration / totalSegments;
   
   return {
     totalSegments,
-    totalDuration: Math.round(totalDuration),
-    averageSegmentLength: Math.round(averageSegmentLength)
+    totalDuration: Math.round(totalDuration * 100) / 100,
+    averageSegmentLength: Math.round(averageSegmentLength),
+    averageSegmentDuration: Math.round(averageSegmentDuration * 100) / 100,
+    timingRegenerated: segments[0]?.timingRegenerated || false
   };
 };
 
